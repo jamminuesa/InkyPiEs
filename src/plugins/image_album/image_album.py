@@ -184,3 +184,30 @@ class ImageAlbum(BasePlugin):
 
         logger.info("=== Image Album Plugin: Image generation complete ===")
         return img
+
+    def handle_button(self, button_name, device_config):
+        """
+        Manages buttons for Image Album:
+
+        A: Generate a new/next image from album
+        B,C,D: Not config
+        """
+        logger.info(f"ImageAlbum manejando botón {button_name}")
+
+        settings = self.config.get('settings', {})
+
+        # Botón B: Nueva imagen aleatoria
+        if button_name == 'A':
+            logger.info("Botón A: Generando nueva imagen aleatoria")
+            try:
+                return self.generate_image(settings, device_config)
+            except Exception as e:
+                logger.error(f"Error generando nueva imagen: {e}")
+                return None
+
+        # Botón A y C: Navegación entre álbumes (si están configurados)
+        elif button_name in ['B', 'C', 'D']:
+            logger.info(f"ImageAlbum button pressed {button_name}")
+            logger.info("Buttons not assigned")
+
+        return None

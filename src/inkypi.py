@@ -19,6 +19,7 @@ import json
 import logging
 import threading
 import argparse
+import locale
 from utils.app_utils import generate_startup_image
 from flask import Flask, request, send_from_directory
 from werkzeug.serving import is_running_from_reloader
