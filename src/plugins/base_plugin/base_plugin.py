@@ -102,3 +102,22 @@ class BasePlugin:
         rendered_html = template.render(template_params)
 
         return take_screenshot_html(rendered_html, dimensions)
+
+    def handle_button(self, button_name, device_config):
+        """
+        Maneja la pulsación de un botón cuando este plugin está activo.
+
+        Los plugins que quieran responder a botones deben sobrescribir este método.
+
+        Args:
+            button_name (str): Nombre del botón presionado ('A', 'B', 'C', 'D')
+            device_config: Configuración del dispositivo
+
+        Returns:
+            PIL.Image: Nueva imagen para mostrar (si se debe actualizar el display)
+            None: Si no se debe actualizar el display
+            dict: Diccionario con información de la acción realizada
+        """
+        # Implementación por defecto: no hacer nada
+        logger.debug(f"Plugin {self.__class__.__name__} no maneja el botón {button_name}")
+        return None

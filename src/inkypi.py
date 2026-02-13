@@ -33,6 +33,7 @@ from blueprints.apikeys import apikeys_bp
 from jinja2 import ChoiceLoader, FileSystemLoader
 from plugins.plugin_registry import load_plugins
 from waitress import serve
+from button_handler import ButtonHandler
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ app.jinja_loader = ChoiceLoader([FileSystemLoader(directory) for directory in te
 device_config = Config()
 display_manager = DisplayManager(device_config)
 refresh_task = RefreshTask(device_config, display_manager)
+button_handler = ButtonHandler(device_config, display_manager, refresh_task)
 
 load_plugins(device_config.get_plugins())
 
@@ -70,6 +72,7 @@ load_plugins(device_config.get_plugins())
 app.config['DEVICE_CONFIG'] = device_config
 app.config['DISPLAY_MANAGER'] = display_manager
 app.config['REFRESH_TASK'] = refresh_task
+app.config['BUTTON_HANDLER'] = button_handler
 
 # Set additional parameters
 app.config['MAX_FORM_PARTS'] = 10_000
@@ -84,10 +87,26 @@ app.register_blueprint(apikeys_bp)
 # Register opener for HEIF/HEIC images
 register_heif_opener()
 
+def setup_locale():
+    """Configura el locale basándose en la configuración del sistema"""
+    try:
+        # Intenta usar el locale por defecto del sistema
+        locale.setlocale(locale.LC_TIME, '')
+        logger.info(f"Locale configurado: {locale.getlocale(locale.LC_TIME)}")
+    except locale.Error as e:
+        logger.warning(f"No se pudo configurar locale del sistema: {e}")
+        # Fallback a español si falla
+        try:
+            locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+        except locale.Error:
+            logger.warning("Usando locale por defecto")
+
 if __name__ == '__main__':
 
+    setup_locale()
     # start the background refresh task
     refresh_task.start()
+    button_handler.start()
 
     # display default inkypi image on startup
     if device_config.get_config("startup") is True:
@@ -115,3 +134,4 @@ if __name__ == '__main__':
         serve(app, host="0.0.0.0", port=PORT, threads=1)
     finally:
         refresh_task.stop()
+        button_handler,stop()
