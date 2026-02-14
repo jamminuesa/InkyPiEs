@@ -106,6 +106,12 @@ class ImmichProvider:
 
 
 class ImageAlbum(BasePlugin):
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Caché de settings para usar en handle_button
+        self.cached_settings = None
+    
     def generate_settings_template(self):
         template_params = super().generate_settings_template()
         template_params['api_key'] = {
@@ -117,6 +123,9 @@ class ImageAlbum(BasePlugin):
 
     def generate_image(self, settings, device_config):
         logger.info("=== Image Album Plugin: Starting image generation ===")
+        
+        # Cachear settings para usar en handle_button
+        self.cached_settings = settings
 
         orientation = device_config.get_config("orientation")
         dimensions = device_config.get_resolution()
@@ -190,13 +199,48 @@ class ImageAlbum(BasePlugin):
         Manages buttons for Image Album:
 
         A: Generate a new/next image from album
-        B,C,D: Not config
+        B,C,D: Not configured
         """
         logger.info(f"ImageAlbum manejando botón {button_name}")
 
-        settings = self.config.get('settings', {})
+        # SOLUCIÓN: Usar settings cacheados del último generate_image
+        # Esto funciona porque generate_image siempre se llama antes de handle_button
+        settings = self.cached_settings
+        
+        if not settings:
+            logger.error("No hay settings cacheados. generate_image debe ejecutarse primero.")
+            logger.info("Intentando obtener settings desde refresh_info...")
+            
+            # Fallback: intentar obtener desde refresh_info
+            try:
+                refresh_info = device_config.get_refresh_info()
+                playlist_manager = device_config.get_playlist_manager()
+                
+                if hasattr(refresh_info, 'plugin_instance') and playlist_manager:
+                    plugin_instance_name = refresh_info.plugin_instance
+                    
+                    if playlist_manager.active_playlist:
+                        active_playlist = playlist_manager.get_playlist(playlist_manager.active_playlist)
+                        
+                        if active_playlist:
+                            # Buscar la instancia del plugin en la playlist
+                            for plugin_inst in active_playlist.plugins:
+                                if plugin_inst.name == plugin_instance_name:
+                                    settings = plugin_inst.settings
+                                    logger.info(f"Settings recuperados desde playlist: {plugin_instance_name}")
+                                    break
+                
+                if not settings:
+                    logger.error("No se pudieron recuperar settings. Abortando.")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error recuperando settings: {e}")
+                return None
+        
+        logger.debug(f"Settings: albumProvider={settings.get('albumProvider')}, album={settings.get('album')}")
 
-        # Botón B: Nueva imagen aleatoria
+        # Botón A: Nueva imagen aleatoria
         if button_name == 'A':
             logger.info("Botón A: Generando nueva imagen aleatoria")
             try:
@@ -205,9 +249,9 @@ class ImageAlbum(BasePlugin):
                 logger.error(f"Error generando nueva imagen: {e}")
                 return None
 
-        # Botón A y C: Navegación entre álbumes (si están configurados)
+        # Botones B, C, D: No configurados
         elif button_name in ['B', 'C', 'D']:
-            logger.info(f"ImageAlbum button pressed {button_name}")
-            logger.info("Buttons not assigned")
+            logger.info(f"ImageAlbum button {button_name} pressed")
+            logger.info("Button not assigned yet")
 
         return None

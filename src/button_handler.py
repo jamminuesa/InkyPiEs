@@ -1,11 +1,7 @@
-#!/usr/bin/env python3
-"""
-Button Handler for InkyPi
-Manages physical buttons and delegates actions to active plugins
-"""
-
 import threading
 import logging
+import select
+import time
 import gpiod
 import gpiodevice
 from gpiod.line import Bias, Direction, Edge
@@ -15,7 +11,7 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 class ButtonHandler:
-    """Gestiona los botones físicos y delega acciones al plugin activo"""
+    """Manages physical buttons and delegates actions to active plugin"""
     
     # GPIO pins for buttons (BCM numbering)
     SW_A = 5
@@ -25,6 +21,9 @@ class ButtonHandler:
     
     BUTTONS = [SW_A, SW_B, SW_C, SW_D]
     LABELS = ["A", "B", "C", "D"]
+    
+    # Anti-bounce configuration
+    DEBOUNCE_TIME = 0.3  # Seconds between presses of the same button
     
     def __init__(self, device_config, display_manager, refresh_task):
         self.device_config = device_config
@@ -39,12 +38,19 @@ class ButtonHandler:
         self.request = None
         self.offsets = None
         
-        logger.info("ButtonHandler inicializado")
+        # Anti-bounce: timestamp of last press per button
+        self.last_press_time = {}
+        
+        # Processing lock: prevents multiple simultaneous processing
+        self.processing_lock = threading.Lock()
+        self.is_processing = False
+        
+        logger.info("ButtonHandler initialized with anti-bounce protection")
     
     def start(self):
-        """Inicia el listener de botones en un hilo separado"""
+        """Starts the button listener in a separate thread"""
         if self.thread and self.thread.is_alive():
-            logger.warning("ButtonHandler ya está corriendo")
+            logger.warning("ButtonHandler already running")
             return
         
         try:
@@ -64,21 +70,21 @@ class ButtonHandler:
                 config=line_config
             )
             
-            logger.info("GPIO configurado correctamente para botones")
+            logger.info("GPIO configured correctly for buttons")
             
-            # Iniciar hilo de lectura
+            # Start reading thread
             self.running = True
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
             
-            logger.info("ButtonHandler iniciado y escuchando eventos")
+            logger.info("ButtonHandler started and listening for events")
             
         except Exception as e:
-            logger.error(f"Error iniciando ButtonHandler: {e}")
+            logger.error(f"Error starting ButtonHandler: {e}")
             self.running = False
     
     def stop(self):
-        """Detiene el listener de botones"""
+        """Stops the button listener"""
         self.running = False
         
         if self.request:
@@ -88,103 +94,162 @@ class ButtonHandler:
         if self.thread:
             self.thread.join(timeout=2)
         
-        logger.info("ButtonHandler detenido")
+        logger.info("ButtonHandler stopped")
     
     def _run(self):
-        """Loop principal que escucha eventos de botones"""
-        logger.info("Iniciando loop de lectura de botones")
+        """
+        Main loop that listens for button events
+        Compatible version: uses select() with timeout
+        """
+        logger.info("Starting button reading loop (select mode)")
         
         while self.running:
             try:
-                # Leer eventos con timeout para permitir salida limpia
-                for event in self.request.read_edge_events(timeout=0.1):
-                    self._handle_button_event(event)
-            except TimeoutError:
-                # Timeout normal, continuar loop
-                continue
+                # Use select() to wait for events with timeout
+                fd = self.request.fd
+                
+                # Wait up to 0.1 seconds for events
+                readable, _, _ = select.select([fd], [], [], 0.1)
+                
+                if readable:
+                    # Events available, read them
+                    try:
+                        events = self.request.read_edge_events()
+                        for event in events:
+                            self._handle_button_event(event)
+                    except Exception as e:
+                        logger.error(f"Error reading events: {e}")
+                
             except Exception as e:
-                logger.error(f"Error leyendo eventos de botones: {e}")
-                if not self.running:
+                if self.running:
+                    logger.error(f"Error in button loop: {e}")
+                    time.sleep(0.5)
+                else:
                     break
         
-        logger.info("Loop de botones finalizado")
+        logger.info("Button loop finished")
     
     def _handle_button_event(self, event):
-        """Procesa un evento de botón"""
+        """
+        Handles a button event with anti-bounce protection
+        This runs in the main button listener thread - must be fast!
+        """
         try:
-            # Identificar qué botón se presionó
+            # Identify which button was pressed
             index = self.offsets.index(event.line_offset)
             gpio_number = self.BUTTONS[index]
             label = self.LABELS[index]
             
-            logger.info(f"Botón presionado: {label} (GPIO {gpio_number})")
+            current_time = time.time()
             
-            # Obtener información del plugin activo
+            # PROTECTION 1: Debouncing per button
+            last_time = self.last_press_time.get(label, 0)
+            time_since_last_press = current_time - last_time
+            
+            if time_since_last_press < self.DEBOUNCE_TIME:
+                logger.debug(f"Ignoring bounce of button {label} "
+                           f"({time_since_last_press:.2f}s since last press)")
+                return
+            
+            # Update timestamp of this press
+            self.last_press_time[label] = current_time
+            
+            # PROTECTION 2: Global processing lock
+            if self.is_processing:
+                logger.warning(f"Button {label} pressed but processing already in progress. Ignoring.")
+                return
+            
+            logger.info(f"Button pressed: {label} (GPIO {gpio_number})")
+            
+            # Mark that we're processing
+            with self.processing_lock:
+                self.is_processing = True
+            
+            # CRITICAL: Process button in a SEPARATE THREAD
+            # This allows the main loop to continue detecting (and rejecting) button presses
+            # while the image is being generated and displayed
+            processing_thread = threading.Thread(
+                target=self._process_button_async,
+                args=(label,),
+                daemon=True,
+                name=f"ButtonProcess-{label}"
+            )
+            processing_thread.start()
+            
+        except Exception as e:
+            logger.exception(f"Error handling button event: {e}")
+            # Ensure we release the lock in case of error
+            with self.processing_lock:
+                self.is_processing = False
+    
+    def _process_button_async(self, label):
+        """
+        Processes button action asynchronously in a separate thread
+        This is where the potentially slow operations happen
+        """
+        try:
+            logger.debug(f"Processing button {label} in thread {threading.current_thread().name}")
+            
+            # Get active plugin info
             refresh_info = self.device_config.get_refresh_info()
             plugin_id = refresh_info.plugin_id if refresh_info else None
             
             if not plugin_id:
-                logger.warning(f"Botón {label} presionado pero no hay plugin activo")
+                logger.warning(f"Button {label} pressed but no active plugin")
                 return
             
-            # Obtener instancia del plugin
+            # Get plugin instance
             plugin_config = self.device_config.get_plugin(plugin_id)
             if not plugin_config:
-                logger.error(f"Configuración de plugin {plugin_id} no encontrada")
+                logger.error(f"Plugin config {plugin_id} not found")
                 return
             
             plugin = get_plugin_instance(plugin_config)
             
-            # Verificar si el plugin soporta botones
+            # Check if plugin supports buttons
             if not hasattr(plugin, 'handle_button'):
-                logger.debug(f"Plugin {plugin_id} no soporta botones")
+                logger.debug(f"Plugin {plugin_id} doesn't support buttons")
                 return
             
-            # Llamar al manejador de botones del plugin
-            logger.info(f"Delegando botón {label} a plugin {plugin_id}")
+            # Call plugin's button handler
+            logger.info(f"Delegating button {label} to plugin {plugin_id}")
             result = plugin.handle_button(label, self.device_config)
             
-            # Si el plugin devuelve una imagen, actualizar el display
+            # If plugin returns an image, update the display
             if isinstance(result, Image.Image):
-                logger.info(f"Plugin retornó nueva imagen, actualizando display")
+                logger.info(f"Plugin returned new image, updating display")
                 self.display_manager.display_image(
                     result,
                     image_settings=plugin.config.get("image_settings", [])
                 )
                 
-                # Actualizar el hash de la imagen en refresh_info
+                # Update image hash in refresh_info
                 from utils.image_utils import compute_image_hash
                 image_hash = compute_image_hash(result)
                 refresh_info.image_hash = image_hash
                 self.device_config.write_config()
                 
-                logger.info(f"Display actualizado tras presionar botón {label}")
+                logger.info(f"Display updated after pressing button {label}")
             elif result is not None:
-                logger.debug(f"Plugin retornó: {result}")
+                logger.debug(f"Plugin returned: {result}")
             
         except Exception as e:
-            logger.exception(f"Error manejando evento de botón: {e}")
+            logger.exception(f"Error processing button {label}: {e}")
+        finally:
+            # ALWAYS release the processing lock, even if there was an error
+            with self.processing_lock:
+                self.is_processing = False
+                logger.debug(f"Button {label} processing completed, lock released")
     
     def simulate_button_press(self, button_label):
         """
-        Simula la pulsación de un botón (útil para testing o web UI)
+        Simulates a button press (useful for testing or web UI)
         
         Args:
-            button_label: 'A', 'B', 'C', o 'D'
+            button_label: 'A', 'B', 'C', or 'D'
         """
         if button_label not in self.LABELS:
-            logger.error(f"Etiqueta de botón inválida: {button_label}")
+            logger.error(f"Invalid button label: {button_label}")
             return
         
-        logger.info(f"Simulando pulsación de botón {button_label}")
-        
-        # Crear un objeto event simulado
-        class SimulatedEvent:
-            def __init__(self, offset):
-                self.line_offset = offset
-        
-        index = self.LABELS.index(button_label)
-        offset = self.offsets[index] if self.offsets else index
-        event = SimulatedEvent(offset)
-        
-        self._handle_button_event(event)
+        logger.info(f"Simulating button press: {button_label}")
